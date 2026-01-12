@@ -1,0 +1,246 @@
+Sub AnalyseReseauComplete()
+    ' ==========================================================================================
+    ' SAÉ 1.05 - DASHBOARD D'ANALYSE RÉSEAU & CYBERSÉCURITÉ
+    ' Auteur : [Ton Nom]
+    ' Description : Analyse les logs tcpdump (CSV 8 colonnes) et génère un rapport visuel.
+    ' ==========================================================================================
+
+    Dim wsData As Worksheet, wsDash As Worksheet
+    Dim lastRow As Long, i As Long
+    Dim dictIP As Object, dictOctets As Object, dictSSH As Object, dictSYN As Object
+    Dim dictScan As Object, subDict As Object
+    Dim srcIP As String, dstPort As String, flags As String, proto As String
+    Dim pktLen As Long
+    Dim anomalies As Collection
+    Dim timestamp As String
+    
+    ' Optimisation de l'affichage
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+    
+    ' Initialisation des dictionnaires
+    Set dictIP = CreateObject("Scripting.Dictionary")      ' Compte paquets par IP
+    Set dictOctets = CreateObject("Scripting.Dictionary")  ' Volume par IP
+    Set dictSSH = CreateObject("Scripting.Dictionary")     ' Attaques SSH par IP
+    Set dictSYN = CreateObject("Scripting.Dictionary")     ' SYN Flood par IP
+    Set dictScan = CreateObject("Scripting.Dictionary")    ' Scan de ports (IP -> Liste ports)
+    Set anomalies = New Collection
+    
+    ' Gestion de la feuille de données
+    Set wsData = ActiveSheet
+    lastRow = wsData.Cells(wsData.Rows.Count, "A").End(xlUp).Row
+    
+    ' --- 1. NETTOYAGE & PRÉPARATION ---
+    ' Conversion Texte en Colonnes si nécessaire (séparateur point-virgule)
+    If Application.WorksheetFunction.CountA(wsData.Columns(2)) = 0 Then
+        wsData.Columns("A:A").TextToColumns Destination:=Range("A1"), DataType:=xlDelimited, _
+            Semicolon:=True, Tab:=False, Comma:=False, Space:=False, Other:=False
+    End If
+    
+    ' --- 2. ANALYSE DES DONNÉES (BOUCLE PRINCIPALE) ---
+    For i = 2 To lastRow
+        ' Lecture des colonnes (Timestamp;SrcIP;SrcPort;DstIP;DstPort;Flags;Length;Info)
+        srcIP = CStr(wsData.Cells(i, 2).Value)
+        dstPort = LCase(CStr(wsData.Cells(i, 5).Value))
+        flags = UCase(CStr(wsData.Cells(i, 6).Value))
+        pktLen = Val(wsData.Cells(i, 7).Value)
+        
+        If srcIP <> "" Then
+            ' A. Compteurs globaux
+            dictIP(srcIP) = dictIP(srcIP) + 1
+            dictOctets(srcIP) = dictOctets(srcIP) + pktLen
+            
+            ' B. Détection SSH (Port 22 ou mot clé ssh)
+            If dstPort = "22" Or dstPort = "ssh" Then
+                dictSSH(srcIP) = dictSSH(srcIP) + 1
+            End If
+            
+            ' C. Détection SYN Flood (Flag S)
+            If InStr(flags, "S") > 0 Then
+                dictSYN(srcIP) = dictSYN(srcIP) + 1
+            End If
+            
+            ' D. Détection Port Scan (Comptage des ports uniques visés)
+            If Not dictScan.Exists(srcIP) Then
+                Set subDict = CreateObject("Scripting.Dictionary")
+                dictScan.Add srcIP, subDict
+            End If
+            If Not dictScan(srcIP).Exists(dstPort) Then
+                dictScan(srcIP).Add dstPort, 1
+            End If
+        End If
+    Next i
+    
+    ' --- 3. IDENTIFICATION DES ANOMALIES ---
+    Dim k As Variant
+    
+    ' Scan de Ports (> 5 ports différents)
+    For Each k In dictScan.Keys
+        If dictScan(k).Count > 5 Then
+            anomalies.Add "⚠️ PORT SCAN|" & k & "|A visé " & dictScan(k).Count & " ports différents|CRITIQUE"
+        End If
+    Next k
+    
+    ' SSH Brute Force (> 20 tentatives)
+    For Each k In dictSSH.Keys
+        If dictSSH(k) > 20 Then
+            anomalies.Add "🔴 BRUTE FORCE SSH|" & k & "|" & dictSSH(k) & " tentatives de connexion|CRITIQUE"
+        End If
+    Next k
+    
+    ' SYN Flood (> 50 paquets SYN)
+    For Each k In dictSYN.Keys
+        If dictSYN(k) > 50 Then
+            anomalies.Add "🌊 SYN FLOOD|" & k & "|" & dictSYN(k) & " paquets SYN envoyés|HAUTE"
+        End If
+    Next k
+    
+    ' --- 4. CRÉATION DU DASHBOARD ---
+    On Error Resume Next
+    Worksheets("Dashboard_Securite").Delete
+    On Error GoTo 0
+    Set wsDash = Worksheets.Add(Before:=wsData)
+    wsDash.Name = "Dashboard_Securite"
+    
+    ' Titre Principal
+    With wsDash.Range("B2:K3")
+        .Merge
+        .Value = "DASHBOARD DE SÉCURITÉ RÉSEAU (SAÉ 1.05)"
+        .Font.Size = 20
+        .Font.Bold = True
+        .Font.Color = RGB(255, 255, 255)
+        .Interior.Color = RGB(44, 62, 80) ' Bleu nuit
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+    End With
+    
+    ' KPIs (Indicateurs Clés)
+    Call CreerCarte(wsDash, "B5", "Total Paquets", lastRow - 1, RGB(52, 152, 219))
+    Call CreerCarte(wsDash, "E5", "IP Sources Uniques", dictIP.Count, RGB(26, 188, 156))
+    Call CreerCarte(wsDash, "H5", "Menaces Détectées", anomalies.Count, IIf(anomalies.Count > 0, RGB(231, 76, 60), RGB(39, 174, 96)))
+    
+    ' --- 5. TABLEAU DES MENACES ---
+    wsDash.Range("B9").Value = "🚨 JOURNAL DES ALERTES DE SÉCURITÉ"
+    wsDash.Range("B9").Font.Bold = True
+    wsDash.Range("B9").Font.Size = 14
+    
+    wsDash.Range("B10:E10").Value = Array("TYPE D'ATTAQUE", "IP SOURCE", "DÉTAILS", "GRAVITÉ")
+    wsDash.Range("B10:E10").Interior.Color = RGB(200, 200, 200)
+    wsDash.Range("B10:E10").Font.Bold = True
+    
+    Dim rowIdx As Long: rowIdx = 11
+    If anomalies.Count > 0 Then
+        Dim alertParts() As String
+        For i = 1 To anomalies.Count
+            alertParts = Split(anomalies(i), "|")
+            wsDash.Cells(rowIdx, 2).Value = alertParts(0)
+            wsDash.Cells(rowIdx, 3).Value = alertParts(1)
+            wsDash.Cells(rowIdx, 4).Value = alertParts(2)
+            wsDash.Cells(rowIdx, 5).Value = alertParts(3)
+            
+            ' Couleur selon gravité
+            If alertParts(3) = "CRITIQUE" Then
+                wsDash.Range("B" & rowIdx & ":E" & rowIdx).Font.Color = RGB(200, 0, 0)
+                wsDash.Range("B" & rowIdx & ":E" & rowIdx).Font.Bold = True
+            End If
+            rowIdx = rowIdx + 1
+        Next i
+    Else
+        wsDash.Range("B11").Value = "Aucune menace détectée."
+        wsDash.Range("B11:E11").Merge
+        rowIdx = 12
+    End If
+    
+    ' Mise en forme tableau alertes
+    wsDash.Range("B10:E" & rowIdx - 1).Borders.LineStyle = xlContinuous
+    wsDash.Columns("B:E").AutoFit
+    
+    ' --- 6. TABLEAU TOP TALKERS & GRAPHIQUE ---
+    Dim chartStartRow As Long
+    chartStartRow = rowIdx + 3
+    
+    wsDash.Cells(chartStartRow, 2).Value = "📊 TOP 5 IP SOURCES (VOLUME)"
+    wsDash.Cells(chartStartRow, 2).Font.Bold = True
+    
+    ' Copier les données pour le graphique
+    ' (Pour simplifier, on prend les 5 premières IPs du dictionnaire, idéalement il faudrait trier)
+    wsDash.Cells(chartStartRow + 1, 2).Value = "IP Source"
+    wsDash.Cells(chartStartRow + 1, 3).Value = "Volume (Octets)"
+    
+    Dim count As Integer: count = 0
+    Dim r As Long: r = chartStartRow + 2
+    
+    ' Tri basique (Bubble Sort) pour le Top 5
+    Dim arrKeys As Variant, arrItems As Variant
+    arrKeys = dictOctets.Keys
+    arrItems = dictOctets.Items
+    Dim x As Long, y As Long, tempVal As Variant, tempKey As Variant
+    
+    For x = LBound(arrItems) To UBound(arrItems) - 1
+        For y = x + 1 To UBound(arrItems)
+            If arrItems(y) > arrItems(x) Then
+                tempVal = arrItems(x): arrItems(x) = arrItems(y): arrItems(y) = tempVal
+                tempKey = arrKeys(x): arrKeys(x) = arrKeys(y): arrKeys(y) = tempKey
+            End If
+        Next y
+    Next x
+    
+    ' Affichage Top 5
+    For x = 0 To UBound(arrKeys)
+        If x >= 5 Then Exit For
+        wsDash.Cells(r, 2).Value = arrKeys(x)
+        wsDash.Cells(r, 3).Value = arrItems(x)
+        r = r + 1
+    Next x
+    
+    ' Création du Graphique (Histogramme)
+    Dim chartObj As ChartObject
+    Set chartObj = wsDash.ChartObjects.Add(Left:=wsDash.Range("F" & chartStartRow).Left, _
+                                           Top:=wsDash.Range("F" & chartStartRow).Top, _
+                                           Width:=400, Height:=200)
+    
+    With chartObj.Chart
+        .SetSourceData Source:=wsDash.Range("B" & chartStartRow + 1 & ":C" & r - 1)
+        .ChartType = xlColumnClustered
+        .HasTitle = True
+        .ChartTitle.Text = "Volume de données par IP (Top 5)"
+    End With
+
+    ' --- 7. FINITIONS ---
+    wsDash.Activate
+    ActiveWindow.DisplayGridlines = False
+    Application.ScreenUpdating = True
+    
+    MsgBox "Analyse terminée avec succès !" & vbCrLf & _
+           "Alertes trouvées : " & anomalies.Count, vbInformation, "SAE 1.05 Report"
+
+End Sub
+
+' Sous-routine pour créer les cartes KPIs
+Sub CreerCarte(ws As Worksheet, cellAddr As String, titre As String, valeur As Variant, couleur As Long)
+    With ws.Range(cellAddr).Resize(3, 2)
+        .Merge
+        .Interior.Color = couleur
+        .Borders.LineStyle = xlContinuous
+        .BorderAround Weight:=xlMedium
+    End With
+    
+    ' Titre
+    With ws.Range(cellAddr)
+        .Value = titre
+        .Font.Color = vbWhite
+        .Font.Size = 10
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlTop
+    End With
+    
+    ' Valeur
+    With ws.Range(cellAddr).Offset(1, 0)
+        ' Pas de merge ici car déjà fusionné par le Resize au dessus ?
+        ' Correction : On écrit directement dans la cellule fusionnée mais avec un saut de ligne
+        ws.Range(cellAddr).Value = titre & vbCrLf & valeur
+        ws.Range(cellAddr).Font.Bold = True
+        ws.Range(cellAddr).VerticalAlignment = xlCenter
+        ' On ajuste la taille de la valeur (nécessite Rich Text, complexe en VBA simple, on reste simple)
+    End With
+End Sub
